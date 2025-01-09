@@ -2,19 +2,20 @@ package io.zeebe.zeeqs.data.reactive
 
 import io.zeebe.zeeqs.data.entity.*
 import org.springframework.stereotype.Component
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.function.Consumer
 
 @Component
 class DataUpdatesPublisher {
 
-    private val processListeners = mutableListOf<Consumer<Process>>()
-    private val decisionListeners = mutableListOf<Consumer<Decision>>()
-    private val processInstanceListeners = mutableListOf<Consumer<ProcessInstance>>()
-    private val elementInstanceListeners = mutableListOf<Consumer<ElementInstance>>()
-    private val variableListeners = mutableListOf<Consumer<Variable>>()
-    private val incidentListeners = mutableListOf<Consumer<Incident>>()
-    private val jobListeners = mutableListOf<Consumer<Job>>()
-    private val decisionEvaluationListeners = mutableListOf<Consumer<DecisionEvaluation>>()
+    private val processListeners = CopyOnWriteArrayList<Consumer<Process>>()
+    private val decisionListeners = CopyOnWriteArrayList<Consumer<Decision>>()
+    private val processInstanceListeners = CopyOnWriteArrayList<Consumer<ProcessInstance>>()
+    private val elementInstanceListeners = CopyOnWriteArrayList<Consumer<ElementInstance>>()
+    private val variableListeners = CopyOnWriteArrayList<Consumer<Variable>>()
+    private val incidentListeners = CopyOnWriteArrayList<Consumer<Incident>>()
+    private val jobListeners = CopyOnWriteArrayList<Consumer<Job>>()
+    private val decisionEvaluationListeners = CopyOnWriteArrayList<Consumer<DecisionEvaluation>>()
 
     fun onProcessUpdated(process: Process) {
         processListeners.forEach { it.accept(process) }
