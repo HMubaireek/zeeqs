@@ -10,7 +10,6 @@ import io.zeebe.zeeqs.data.entity.*
 import io.zeebe.zeeqs.data.reactive.DataUpdatesPublisher
 import io.zeebe.zeeqs.data.repository.*
 import io.zeebe.zeeqs.importer.hazelcast.ProtobufTransformer.structToMap
-import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
 import java.time.Duration
 
@@ -36,15 +35,6 @@ class HazelcastImporter(
     private val signalImporter: HazelcastSignalImporter,
     private val dataUpdatesPublisher: DataUpdatesPublisher
 ) {
-
-    private val logger = LoggerFactory.getLogger(HazelcastImporter::class.java)
-
-    // Offset for generating synthetic keys when Zeebe reuses element instance keys
-    // Using a large offset to avoid conflicts with real Zeebe keys
-    private val SYNTHETIC_KEY_OFFSET = 9000000000000000L
-    
-    // Counter for generating unique synthetic keys when there are multiple collisions
-    private val syntheticKeyCounter = java.util.concurrent.atomic.AtomicLong(0)
 
     var zeebeHazelcast: ZeebeHazelcast? = null
 
@@ -230,41 +220,9 @@ class HazelcastImporter(
     }
 
     private fun importElementInstance(record: Schema.ProcessInstanceRecord) {
-        val existingEntity = elementInstanceRepository.findById(record.metadata.key)
-        
-        val entity = if (existingEntity.isPresent) {
-            val existing = existingEntity.get()
-            // Check if this is the same element or if the key was reused for a different element
-            if (existing.elementId == record.elementId) {
-                // Same element - update it (state transitions like ACTIVATING → COMPLETED)
-                existing
-            } else {
-                // Different element with same key - Zeebe has reused the key
-                // Create new element instance with synthetic key instead of skipping
-                val isSameProcess = existing.processInstanceKey == record.processInstanceKey
-                
-                if (isSameProcess) {
-                    logger.warn(
-                        "ElementInstance key {} reused within SAME process instance. " +
-                        "Existing: PI={}, elementId={}. New: PI={}, elementId={}. Creating synthetic key.",
-                        record.metadata.key, existing.processInstanceKey, existing.elementId,
-                        record.processInstanceKey, record.elementId
-                    )
-                } else {
-                    logger.info(
-                        "ElementInstance key {} reused across process instances. " +
-                        "Existing: PI={}, elementId={}. New: PI={}, elementId={}. Creating synthetic key.",
-                        record.metadata.key, existing.processInstanceKey, existing.elementId,
-                        record.processInstanceKey, record.elementId
-                    )
-                }
-                
-                createElementInstanceWithSyntheticKey(record)
-            }
-        } else {
-            // New element instance - use original Zeebe key
-            createElementInstance(record)
-        }
+        val entity = elementInstanceRepository
+            .findById(record.metadata.key)
+            .orElse(createElementInstance(record))
 
         entity.state = getElementInstanceState(record)
 
@@ -286,40 +244,9 @@ class HazelcastImporter(
         elementInstanceRepository.save(entity)
         dataUpdatesPublisher.onElementInstanceUpdated(entity)
     }
-    
-    private fun createElementInstanceWithSyntheticKey(record: Schema.ProcessInstanceRecord): ElementInstance {
-        // Generate a synthetic key that won't conflict with Zeebe keys
-        // We use a large offset plus a counter to ensure uniqueness
-        val syntheticKey = SYNTHETIC_KEY_OFFSET + record.metadata.key + syntheticKeyCounter.incrementAndGet()
-        
-        // Check if synthetic key already exists (unlikely but possible)
-        var finalKey = syntheticKey
-        var attempt = 0
-        while (elementInstanceRepository.findById(finalKey).isPresent && attempt < 10) {
-            finalKey = SYNTHETIC_KEY_OFFSET + record.metadata.key + syntheticKeyCounter.incrementAndGet()
-            attempt++
-        }
-        
-        if (attempt >= 10) {
-            logger.error(
-                "Failed to generate unique synthetic key for element instance after 10 attempts. " +
-                "Original key: {}, elementId: {}", 
-                record.metadata.key, record.elementId
-            )
-            throw IllegalStateException("Unable to generate unique synthetic key for element instance")
-        }
-        
-        logger.debug(
-            "Created element instance with synthetic key {} (original Zeebe key: {}, elementId: {})",
-            finalKey, record.metadata.key, record.elementId
-        )
-        
-        // Reuse createElementInstance with custom synthetic key
-        return createElementInstance(record, customKey = finalKey)
-    }
 
-    private fun mapBpmnElementType(bpmnElementTypeString: String): BpmnElementType {
-        return when (bpmnElementTypeString) {
+    private fun createElementInstance(record: Schema.ProcessInstanceRecord): ElementInstance {
+        val bpmnElementType = when (record.bpmnElementType) {
             "UNSPECIFIED" -> BpmnElementType.UNSPECIFIED
             "BOUNDARY_EVENT" -> BpmnElementType.BOUNDARY_EVENT
             "CALL_ACTIVITY" -> BpmnElementType.CALL_ACTIVITY
@@ -345,13 +272,9 @@ class HazelcastImporter(
             "INCLUSIVE_GATEWAY" -> BpmnElementType.INCLUSIVE_GATEWAY
             else -> BpmnElementType.UNKNOWN
         }
-    }
-    
-    private fun createElementInstance(record: Schema.ProcessInstanceRecord, customKey: Long? = null): ElementInstance {
-        val bpmnElementType = mapBpmnElementType(record.bpmnElementType)
 
         return ElementInstance(
-            key = customKey ?: record.metadata.key,  // Use custom key if provided, otherwise use record key
+            key = record.metadata.key,
             position = record.metadata.position,
             elementId = record.elementId,
             bpmnElementType = bpmnElementType,
