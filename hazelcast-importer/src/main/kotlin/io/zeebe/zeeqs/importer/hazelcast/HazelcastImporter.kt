@@ -224,39 +224,15 @@ class HazelcastImporter(
     }
 
     private fun importElementInstance(record: Schema.ProcessInstanceRecord) {
-        logger.debug(
-            "importElementInstance - Processing: key={}, elementId={}, PI={}, intent={}, bpmnType={}",
-            record.metadata.key, record.elementId, record.processInstanceKey, 
-            record.metadata.intent, record.bpmnElementType
-        )
-        
         // Look up by BOTH key AND processInstanceKey to handle Zeebe key reuse correctly
         val existingEntity = elementInstanceRepository.findByKeyAndProcessInstanceKey(
             record.metadata.key, 
             record.processInstanceKey
         )
         
-        val entity = if (existingEntity != null) {
-            logger.debug(
-                "importElementInstance - Found existing entity: key={}, elementId={}, PI={}, state={}",
-                existingEntity.key, existingEntity.elementId, existingEntity.processInstanceKey, existingEntity.state
-            )
-            existingEntity
-        } else {
-            // New element instance
-            logger.debug(
-                "importElementInstance - Creating new element instance: key={}, elementId={}, PI={}",
-                record.metadata.key, record.elementId, record.processInstanceKey
-            )
-            createElementInstance(record)
-        }
+        val entity = existingEntity ?: createElementInstance(record)
 
         entity.state = getElementInstanceState(record)
-        
-        logger.debug(
-            "importElementInstance - Saving: key={}, elementId={}, PI={}, state={}",
-            entity.key, entity.elementId, entity.processInstanceKey, entity.state
-        )
 
         when (record.metadata.intent) {
             "ELEMENT_ACTIVATING" -> {
@@ -275,11 +251,6 @@ class HazelcastImporter(
 
         elementInstanceRepository.save(entity)
         dataUpdatesPublisher.onElementInstanceUpdated(entity)
-        
-        logger.debug(
-            "importElementInstance - Saved successfully: key={}, elementId={}, PI={}",
-            entity.key, entity.elementId, entity.processInstanceKey
-        )
     }
     
     private fun mapBpmnElementType(bpmnElementTypeString: String): BpmnElementType {
@@ -363,10 +334,34 @@ class HazelcastImporter(
     }
 
     private fun importVariable(record: Schema.VariableRecord) {
-
-        val entity = variableRepository
-            .findById(record.metadata.key)
-            .orElse(createVariable(record))
+        val existingEntity = variableRepository.findById(record.metadata.key)
+        
+        val entity = if (existingEntity.isPresent) {
+            val existing = existingEntity.get()
+            
+            // Check if this is the same variable or key reuse
+            if (existing.processInstanceKey == record.processInstanceKey && 
+                existing.scopeKey == record.scopeKey &&
+                existing.name == record.name) {
+                // Same variable being updated - no logging needed for performance
+                existing
+            } else {
+                // KEY REUSE DETECTED - this is critical, log it!
+                logger.warn(
+                    "importVariable - KEY REUSE DETECTED! key={} reused for different variable. " +
+                    "OLD: name={}, PI={}, scope={}. " +
+                    "NEW: name={}, PI={}, scope={}. " +
+                    "OLD VARIABLE WILL BE OVERWRITTEN!",
+                    record.metadata.key,
+                    existing.name, existing.processInstanceKey, existing.scopeKey,
+                    record.name, record.processInstanceKey, record.scopeKey
+                )
+                existing
+            }
+        } else {
+            // New variable - only log at debug level
+            createVariable(record)
+        }
 
         entity.value = record.value
         entity.timestamp = record.metadata.timestamp
@@ -389,8 +384,8 @@ class HazelcastImporter(
     }
 
     private fun importVariableUpdate(record: Schema.VariableRecord) {
-
         val partitionIdWithPosition = getPartitionIdWithPosition(record.metadata)
+
         val entity = variableUpdateRepository
             .findById(partitionIdWithPosition)
             .orElse(
@@ -468,75 +463,29 @@ class HazelcastImporter(
     }
 
     private fun importUserTask(record: Schema.JobRecord) {
-        logger.debug(
-            "importUserTask - Processing: jobKey={}, elementInstanceKey={}, PI={}, intent={}",
-            record.metadata.key, record.elementInstanceKey, record.processInstanceKey, record.metadata.intent
-        )
-        
         val entity = userTaskRepository
             .findById(record.metadata.key)
             .orElse(createUserTask(record))
 
-        logger.info(
-            "importUserTask - UserTask entity: key={}, elementInstanceKey={}, PI={}, intent={}",
-            entity.key, entity.elementInstanceKey, entity.processInstanceKey, record.metadata.intent
-        )
-        
-        // Look up ElementInstance by BOTH key AND processInstanceKey (correct way)
-        val elementInstance = elementInstanceRepository.findByKeyAndProcessInstanceKey(
-            record.elementInstanceKey,
-            record.processInstanceKey
-        )
-        
-        if (elementInstance != null) {
-            logger.info(
-                "importUserTask - Found ElementInstance: key={}, elementId={}, PI={}, bpmnType={}",
-                elementInstance.key, elementInstance.elementId, elementInstance.processInstanceKey, 
-                elementInstance.bpmnElementType
-            )
-        } else {
-            logger.warn(
-                "importUserTask - ElementInstance NOT FOUND for key={}, PI={} (UserTask key={})",
-                record.elementInstanceKey, record.processInstanceKey, record.metadata.key
-            )
-        }
-
         when (record.metadata.intent) {
             "CREATED" -> {
                 entity.startTime = record.metadata.timestamp
-                logger.info(
-                    "importUserTask - UserTask CREATED: key={}, elementInstanceKey={}, PI={}",
-                    entity.key, entity.elementInstanceKey, entity.processInstanceKey
-                )
             }
 
             "COMPLETED" -> {
                 entity.state = UserTaskState.COMPLETED
                 entity.endTime = record.metadata.timestamp
-                logger.info(
-                    "importUserTask - UserTask COMPLETED: key={}, elementInstanceKey={}, PI={}",
-                    entity.key, entity.elementInstanceKey, entity.processInstanceKey
-                )
             }
 
             "CANCELED" -> {
                 entity.state = UserTaskState.CANCELED
                 entity.endTime = record.metadata.timestamp
-                logger.info(
-                    "importUserTask - UserTask CANCELED: key={}, elementInstanceKey={}, PI={}",
-                    entity.key, entity.elementInstanceKey, entity.processInstanceKey
-                )
             }
         }
 
         entity.timestamp = record.metadata.timestamp
 
         userTaskRepository.save(entity)
-        
-        logger.debug(
-            "importUserTask - Saved: key={}, elementInstanceKey={}, PI={}, state={}",
-            entity.key, entity.elementInstanceKey, entity.processInstanceKey, entity.state
-        )
     }
 
     private fun createUserTask(record: Schema.JobRecord): UserTask {

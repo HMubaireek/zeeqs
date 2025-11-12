@@ -18,34 +18,43 @@ class DataUpdatesPublisher {
     private val decisionEvaluationListeners = CopyOnWriteArrayList<Consumer<DecisionEvaluation>>()
 
     fun onProcessUpdated(process: Process) {
+        // Quick exit if no listeners (most common case) - Performance optimization
+        if (processListeners.isEmpty()) return
         processListeners.forEach { it.accept(process) }
     }
 
     fun onDecisionUpdated(decision: Decision) {
+        if (decisionListeners.isEmpty()) return
         decisionListeners.forEach { it.accept(decision) }
     }
 
     fun onProcessInstanceUpdated(processInstance: ProcessInstance) {
+        if (processInstanceListeners.isEmpty()) return
         processInstanceListeners.forEach { it.accept(processInstance) }
     }
 
     fun onElementInstanceUpdated(elementInstance: ElementInstance) {
+        if (elementInstanceListeners.isEmpty()) return
         elementInstanceListeners.forEach { it.accept(elementInstance) }
     }
 
     fun onVariableUpdated(variable: Variable) {
+        if (variableListeners.isEmpty()) return
         variableListeners.forEach { it.accept(variable) }
     }
 
     fun onIncidentUpdated(incident: Incident) {
+        if (incidentListeners.isEmpty()) return
         incidentListeners.forEach { it.accept(incident) }
     }
 
     fun onJobUpdated(job: Job) {
+        if (jobListeners.isEmpty()) return
         jobListeners.forEach { it.accept(job) }
     }
 
     fun onDecisionEvaluationUpdated(decisionEvaluation: DecisionEvaluation) {
+        if (decisionEvaluationListeners.isEmpty()) return
         decisionEvaluationListeners.forEach { it.accept(decisionEvaluation) }
     }
 
