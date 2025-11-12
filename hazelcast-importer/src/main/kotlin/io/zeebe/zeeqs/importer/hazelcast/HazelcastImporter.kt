@@ -10,6 +10,7 @@ import io.zeebe.zeeqs.data.entity.*
 import io.zeebe.zeeqs.data.reactive.DataUpdatesPublisher
 import io.zeebe.zeeqs.data.repository.*
 import io.zeebe.zeeqs.importer.hazelcast.ProtobufTransformer.structToMap
+import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
 import java.time.Duration
 
@@ -36,9 +37,12 @@ class HazelcastImporter(
     private val dataUpdatesPublisher: DataUpdatesPublisher
 ) {
 
+    private val logger = LoggerFactory.getLogger(HazelcastImporter::class.java)
+
     var zeebeHazelcast: ZeebeHazelcast? = null
 
     fun start(hazelcastProperties: HazelcastProperties) {
+        logger.info("HazelcastImporter starting - Version with key+processInstanceKey composite lookup fix")
 
         val hazelcastConnection = hazelcastProperties.connection
         val hazelcastConnectionTimeout = Duration.parse(hazelcastProperties.connectionTimeout)
@@ -220,9 +224,13 @@ class HazelcastImporter(
     }
 
     private fun importElementInstance(record: Schema.ProcessInstanceRecord) {
-        val entity = elementInstanceRepository
-            .findById(record.metadata.key)
-            .orElse(createElementInstance(record))
+        // Look up by BOTH key AND processInstanceKey to handle Zeebe key reuse correctly
+        val existingEntity = elementInstanceRepository.findByKeyAndProcessInstanceKey(
+            record.metadata.key, 
+            record.processInstanceKey
+        )
+        
+        val entity = existingEntity ?: createElementInstance(record)
 
         entity.state = getElementInstanceState(record)
 
@@ -244,9 +252,9 @@ class HazelcastImporter(
         elementInstanceRepository.save(entity)
         dataUpdatesPublisher.onElementInstanceUpdated(entity)
     }
-
-    private fun createElementInstance(record: Schema.ProcessInstanceRecord): ElementInstance {
-        val bpmnElementType = when (record.bpmnElementType) {
+    
+    private fun mapBpmnElementType(bpmnElementTypeString: String): BpmnElementType {
+        return when (bpmnElementTypeString) {
             "UNSPECIFIED" -> BpmnElementType.UNSPECIFIED
             "BOUNDARY_EVENT" -> BpmnElementType.BOUNDARY_EVENT
             "CALL_ACTIVITY" -> BpmnElementType.CALL_ACTIVITY
@@ -272,6 +280,10 @@ class HazelcastImporter(
             "INCLUSIVE_GATEWAY" -> BpmnElementType.INCLUSIVE_GATEWAY
             else -> BpmnElementType.UNKNOWN
         }
+    }
+    
+    private fun createElementInstance(record: Schema.ProcessInstanceRecord): ElementInstance {
+        val bpmnElementType = mapBpmnElementType(record.bpmnElementType)
 
         return ElementInstance(
             key = record.metadata.key,
@@ -322,10 +334,34 @@ class HazelcastImporter(
     }
 
     private fun importVariable(record: Schema.VariableRecord) {
-
-        val entity = variableRepository
-            .findById(record.metadata.key)
-            .orElse(createVariable(record))
+        val existingEntity = variableRepository.findById(record.metadata.key)
+        
+        val entity = if (existingEntity.isPresent) {
+            val existing = existingEntity.get()
+            
+            // Check if this is the same variable or key reuse
+            if (existing.processInstanceKey == record.processInstanceKey && 
+                existing.scopeKey == record.scopeKey &&
+                existing.name == record.name) {
+                // Same variable being updated - no logging needed for performance
+                existing
+            } else {
+                // KEY REUSE DETECTED - this is critical, log it!
+                logger.warn(
+                    "importVariable - KEY REUSE DETECTED! key={} reused for different variable. " +
+                    "OLD: name={}, PI={}, scope={}. " +
+                    "NEW: name={}, PI={}, scope={}. " +
+                    "OLD VARIABLE WILL BE OVERWRITTEN!",
+                    record.metadata.key,
+                    existing.name, existing.processInstanceKey, existing.scopeKey,
+                    record.name, record.processInstanceKey, record.scopeKey
+                )
+                existing
+            }
+        } else {
+            // New variable - only log at debug level
+            createVariable(record)
+        }
 
         entity.value = record.value
         entity.timestamp = record.metadata.timestamp
@@ -348,8 +384,8 @@ class HazelcastImporter(
     }
 
     private fun importVariableUpdate(record: Schema.VariableRecord) {
-
         val partitionIdWithPosition = getPartitionIdWithPosition(record.metadata)
+
         val entity = variableUpdateRepository
             .findById(partitionIdWithPosition)
             .orElse(
